@@ -9,8 +9,6 @@
 #include <sstream>
 #include <unordered_map>
 #include <string>
-#include <algorithm>
-#include <cassert>
 
 #define DEFAULT_FILE_NAME "NONE"
 #define DEFAULT_NUM_KMER 10
@@ -118,7 +116,7 @@ public:
      * The constructor uses a mutex to synchronize access to shared resources, ensuring thread safety.
      * Update the counts of balanced, semi-balanced, and neither nodes, and set the head and tail of the graph if it has an Eulerian walk.
      */
-    DeBruijnGraph(std::vector<std::vector<std::string>> kmersChunks, int k, int nThreads, std::vector<double>& times, bool circularize = false) 
+    DeBruijnGraph(std::vector<std::vector<std::string>> seqChunks, int k, int nThreads, std::vector<double>& times, bool circularize = false) 
         : nsemi(0), nbal(0), nneither(0), head(nullptr), tail(nullptr) {
         std::vector<std::thread> threads(nThreads);
         std::mutex mtx; // Mutex for synchronizing access to shared resources
@@ -127,14 +125,14 @@ public:
         for (int t = 0; t < nThreads; ++t) {
             threads[t] = std::thread([&, t]() {
                 timers[t].start();
-                for (auto& kmers : kmersChunks[t]) {
+                for (auto& seq : seqChunks[t]) {
                     if (circularize) {
-                        kmers += kmers.substr(0, k-1);
+                        seq += seq.substr(0, k-1);
                     }
-                    for (int i = 0; i < kmers.size() - (k-1); ++i) {
-                        std::string kmer = kmers.substr(i, k);
-                        std::string km1L = kmers.substr(i, k-1);
-                        std::string km1R = kmers.substr(i+1, k-1);
+                    for (int i = 0; i < seq.size() - (k-1); ++i) {
+                        std::string kmer = seq.substr(i, k);
+                        std::string km1L = seq.substr(i, k-1);
+                        std::string km1R = seq.substr(i+1, k-1);
                         Node* nodeL = nullptr;
                         Node* nodeR = nullptr;
                         {
@@ -231,7 +229,8 @@ public:
      * @param times A reference to a vector of doubles where the time taken by each thread will be stored.
      * @return A vector of strings representing the Eulerian walk or cycle.
      */
-    std::vector<std::string> eulerianWalkOrCycle(std::vector<std::vector<std::string>> kmersChunks, int nThreads, std::vector<double>& times) {
+
+    std::vector<std::string> eulerianWalkOrCycle(int nThreads, std::vector<double>& times) {
         std::unordered_map<std::string, std::vector<std::string>> g;
         std::vector<timer> timers(nThreads);
 
@@ -264,6 +263,7 @@ public:
         std::vector<bool> stop(nThreads, false);
         std::vector<std::string> headNodes(nThreads);
 
+        
         for (int i = 0; i < nThreads; ++i) {
             workers.emplace_back([&, i]() {
                 timers[i].start();
@@ -285,7 +285,7 @@ public:
                         break;
                     }
                     headNodes[i] = node;
-                    dfs_parallel(g, node, visited, paths[i], visitedMutex, pathMutexes[i], stacks[i], i, stop, headNodes, paths);
+                    euler_parallel(g, node, visited, paths[i], visitedMutex, pathMutexes[i], stacks[i], i, stop, headNodes, paths);
                 }
                 times[i] = timers[i].stop();
             });
@@ -327,7 +327,7 @@ public:
      * @param headNodes A reference to a vector of the head nodes of each thread's path.
      * @param paths A reference to a vector of the paths found by each thread.
      */
-    void dfs_parallel(std::unordered_map<std::string, std::vector<std::string>>& g, const std::string& node, std::unordered_set<std::string>& visited, std::vector<std::string>& tour, std::mutex& visitedMutex, std::mutex& tourMutex, std::stack<std::string>& stack, int i, std::vector<bool>& stop, std::vector<std::string>& headNodes, std::vector<std::vector<std::string>>& paths) {
+    void euler_parallel(std::unordered_map<std::string, std::vector<std::string>>& g, const std::string& node, std::unordered_set<std::string>& visited, std::vector<std::string>& tour, std::mutex& visitedMutex, std::mutex& tourMutex, std::stack<std::string>& stack, int i, std::vector<bool>& stop, std::vector<std::string>& headNodes, std::vector<std::vector<std::string>>& paths) {
         stack.push(node);
         while (!stack.empty() && !stop[i]) {
             std::string node;
@@ -379,57 +379,6 @@ public:
     }
 
 };
-
-/**
- * Divides a list of sequences into chunks and extracts k-mers from each chunk in parallel.
- * 
- * This function uses multithreading to parallelize the process of extracting k-mers from the sequences. 
- * It divides the sequences into chunks, and each thread processes one chunk of the sequences.
- * 
- * @param seq A vector of strings, where each string is a sequence from which k-mers will be extracted.
- * @param k The length of the k-mers to be extracted.
- * @param nThreads The number of threads to use for parallelization.
- * @param times A reference to a vector of doubles where the time taken by each thread will be stored.
- * @return A vector of vectors of strings, where each inner vector is a chunk of k-mers.
- * 
- */
-std::vector<std::vector<std::string>> getKmersParallel(const std::vector<std::string>& seq, int k, int nThreads, std::vector<double>& times) {
-    std::vector<std::vector<std::string>> kmersChunks(nThreads);
-    std::vector<std::thread> threads(nThreads);
-    std::vector<timer> timers(nThreads);
-    std::mutex mtx;
-
-    int chunkSize = seq.size() / nThreads;
-    int remainder = seq.size() % nThreads;
-
-    for (int i = 0; i < nThreads; ++i) {
-        threads[i] = std::thread([&, chunkSize, remainder, i]() {
-            timers[i].start();
-
-            int start = i * chunkSize + std::min(i, remainder);
-            int end = start + chunkSize + (i < remainder);
-
-            std::vector<std::string> localKmers;
-
-            for (int j = start; j < end; ++j) {
-                for (int l = 0; l <= seq[j].size() - k; ++l) {
-                    localKmers.push_back(seq[j].substr(l, k));
-                }
-            }
-
-            mtx.lock();
-            kmersChunks[i] = std::move(localKmers);
-            mtx.unlock();
-            times[i] = timers[i].stop();
-        });
-    }
-
-    for (auto& th : threads) {
-        th.join();
-    }
-
-    return kmersChunks;
-}
 
 int main(int argc, char *argv[]) {
   // Initialize command line arguments
@@ -509,57 +458,54 @@ int main(int argc, char *argv[]) {
         sequences.push_back(sequence);
     }
     
-    timer tKmers, tGraph, tEulerian, tTotal;
-    double totalKmers = 0.0;
+    timer tGraph, tEulerian, tTotal;
     double totalGraph = 0.0;
     double totalEulerian = 0.0;
     double timeTotal = 0.0;
     tTotal.start();
-    tKmers.start();
-    std::vector<double> kmerTimes = {0.0, 0.0, 0.0, 0.0};
-    std::vector<std::vector<std::string>> kmersChunks = getKmersParallel(sequences, kmer, nThreads, kmerTimes);
-    totalKmers = tKmers.stop();
-    for (int i = 0; i < kmersChunks.size(); ++i) {
-        std::cout << "Thread " << i << " has " << kmersChunks[i].size() << " kmers." << std::endl;
-    }
+    
     std::vector<double> graphTimes = {0.0, 0.0, 0.0, 0.0};
+    int chunkSize = sequences.size() / nThreads;
+    int remainder = sequences.size() % nThreads;
+    std::vector<std::vector<std::string>> seqChunks(nThreads);
+    for (int i = 0; i < nThreads; ++i) {
+        int start = i * chunkSize + std::min(i, remainder);
+        int end = start + chunkSize + (i < remainder);
+        for (int j = start; j < end; ++j) {
+            seqChunks[i].push_back(sequences[j]);
+        }
+    }
     tGraph.start();
-    DeBruijnGraph graph(kmersChunks, kmer, nThreads, graphTimes);
+    DeBruijnGraph graph(seqChunks, kmer, nThreads, graphTimes);
     totalGraph = tGraph.stop();
     std::cout << "Number of nodes: " << graph.nnodes() << std::endl;
     std::cout << "Number of edges: " << graph.nedges() << std::endl;
 
-    std::string sequence;
     std::vector<double> eulerTimes = {0.0, 0.0, 0.0, 0.0};
+    std::vector<int> nodesAddedByProcess(nThreads, 0);
     tEulerian.start();
     if (graph.isEulerian()) {
-        std::vector<std::string> longestPath = graph.eulerianWalkOrCycle(kmersChunks, nThreads, eulerTimes);
+        std::vector<std::string> longestPath = graph.eulerianWalkOrCycle(nThreads, eulerTimes);
+        printf("Size of longest path: %ld\n", longestPath.size());
         std::cout << "The graph is Eulerian" << std::endl;
-        std::string sequence = longestPath[0];
+        std::string completeSequence = longestPath[0];
         for (size_t i = 1; i < longestPath.size(); ++i) {
-            sequence += longestPath[i].back();
+            completeSequence += longestPath[i].back();
         }
-        std::cout << sequence << std::endl;
+        std::cout << completeSequence << std::endl;
 
     } else {
-        std::vector<std::string> longestPath = graph.eulerianWalkOrCycle(kmersChunks, nThreads, eulerTimes);
         std::cout << "The graph is not Eulerian" << std::endl;
-        std::string sequence = longestPath[0];
-        for (size_t i = 1; i < longestPath.size(); ++i) {
-            sequence += longestPath[i].back();
-        }
-        std::cout << sequence << std::endl;
     }
     totalEulerian = tEulerian.stop();
     timeTotal = tTotal.stop();
 
-    std::cout << "Threads, Kmers, Graph, Eulerian" << std::endl;
+    std::cout << "Threads, Graph, Eulerian" << std::endl;
     for (int i = 0; i < nThreads; ++i) {
-        std::cout << i << ", " << kmerTimes[i] << ", " << graphTimes[i] << ", " << eulerTimes[i] << std::endl;
+        std::cout << i << ", " << graphTimes[i] << ", " << eulerTimes[i] << std::endl;
     }
-    std::cout << "Total, Total Kmers, Total Graph, Total Eulerian" << std::endl;
-    std::cout << timeTotal << ", " << totalKmers << ", " << totalGraph << ", " << totalEulerian << std::endl;
+    std::cout << "Total, Total Graph, Total Eulerian" << std::endl;
+    std::cout << timeTotal << ", " << totalGraph << ", " << totalEulerian << std::endl;
 
     return 0;
 }
-
